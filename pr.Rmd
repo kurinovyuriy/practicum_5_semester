@@ -1,0 +1,934 @@
+---
+title: "Практикум 5 семестр Юрий Куринов 316 группа"
+output:
+  html_notebook: 
+    toc: yes
+  html_document:
+    code_folding: show
+---
+
+[Ссылка на датасет](https://www.kaggle.com/datasets/timmofeyy/real-estate-in-moscow-for-sale-20220311?select=moscow_real_estate_sale.csv)
+
+Данные представляют собой цены и хаарктеристики недвижимости в Москве.
+
+**Ячейки с кодом Python помечены #python, в остальных - R.**
+
+```{r}
+oldw <- getOption("warn")
+options(warn = -1)
+set.seed(102030)
+
+
+library("dplyr")
+library("tidyr")
+library("mice")
+library("nortest")
+library("outliers")
+library("ISwR")
+library("car")
+library("knitr")
+library("base")
+library("pcaPP")
+library("reticulate")
+library("corrplot")
+library("regclass")
+library("glmnet")
+library("coop")
+```
+
+```{python}
+#python
+import warnings
+
+import matplotlib
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+import statsmodels.api as sm
+from statsmodels.stats.diagnostic import lilliefors
+from statsmodels.stats.contingency_tables import mcnemar
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+from statsmodels.tools.tools import add_constant
+
+from pingouin import ttest
+
+from scipy.stats import kstest, shapiro, anderson, cramervonmises, f_oneway, mannwhitneyu, levene, bartlett, fligner, pearsonr, spearmanr, kendalltau, chisquare, fisher_exact
+
+from sklearn.linear_model import LassoCV
+from sklearn.model_selection import train_test_split
+from sklearn.decomposition import PCA
+from sklearn.metrics import mean_absolute_error
+from sklearn.preprocessing import StandardScaler
+
+from catboost import CatBoostRegressor
+
+from tensorflow import keras
+
+warnings.filterwarnings('ignore')
+sns.set(style="darkgrid")
+```
+
+#### **Читаю данные**
+
+```{r}
+data <- read.csv(file="/Users/Юрий/Desktop/учёба/прак 5 сем/moscow_real_estate_sale.csv", stringsAsFactors = TRUE)
+prices <- data$price
+```
+
+```{python}
+#python
+df = pd.read_csv('/Users/Юрий/Desktop/учёба/прак 5 сем/moscow_real_estate_sale.csv', index_col=0)
+```
+
+# **1. Построение ядерных оценок плотности**
+
+Красным представлено ядро Епанечникова $K(u) = \frac{3}{4}(1 - u^2)I(|u| \leq 1)$, синим - прямоугольное $K(u) = \frac{1}{2} I(|u| \leq 1)$
+
+```{r}
+hist(prices, breaks = 1e4,
+     main = "Распределение цен на недвижимость",
+     xlim = c(0, 1e+8), xlab = "Цена", 
+     ylab = "Плотность")
+
+lines(density(prices, kernel = "rectangular", width=1e-4, n=1024), col = "blue", lwd = 3)
+lines(density(prices, kernel = "epanechnikov", width=1e-4, n=1024), col = "red", lwd = 3)
+```
+
+```{python}
+#python
+p = sns.displot(data=df[df.price < 10**8], x='price', kde=True)
+p.figure.set_size_inches((15, 5))
+plt.show()
+```
+
+# **2. Анализ данных с помощью cdplot, dotcart, boxplot и stripchart**
+
+```{r}
+cdplot(main = "Условная плотность распределения цены для нек. станций", factor(data$metro, levels = c(" Taganskaia ", " Universitet ", " VDNKh ")) ~ data$price, col=c("orange", "red", "brown"), xlab = "Цена", ylab = "Станция метро")
+```
+
+```{python}
+#python
+p = sns.displot(x = 'price', 
+            data = df[(df.metro == ' Taganskaia ') | (df.metro ==  ' Universitet ') | (df.metro == ' VDNKh ')], 
+            hue = 'metro', kind='kde', multiple='fill')
+plt.show()
+```
+
+**Выберем некоторые станции, чтобы сузить область анализа**
+
+```{r}
+data_short = data[
+  which(data$metro == " Taganskaia " | 
+          data$metro == " Universitet " | 
+          data$metro == " VDNKh " | 
+          data$metro == " Tverskaia " | 
+          data$metro == " Babushkinskaia " |
+          data$metro == " Ulitca 1905 goda " | 
+          data$metro == " Smolenskaia "), 
+  ]
+
+d0 = data_short %>% group_by(metro) %>% summarise(mean_price = mean(price))
+
+dotchart(d0$mean_price, labels = d0$metro, xlab="Средняя цена")
+```
+
+```{python}
+#python
+plt.clf()
+df_short = df[(df.metro == " Taganskaia ") | 
+          (df.metro == " Universitet ") | 
+          (df.metro == " VDNKh ") | 
+          (df.metro == " Tverskaia ") | 
+          (df.metro == " Babushkinskaia ") |
+          (df.metro == " Ulitca 1905 goda ") | 
+          (df.metro == " Smolenskaia ")]
+
+d0 = df_short.groupby('metro').price.mean()
+plt.scatter(d0.values, d0.index)
+plt.show()
+```
+
+```{r fig.height=14, fig.width=14}
+boxplot(price ~ metro, data = data_short, horizontal = TRUE, drop = TRUE, main = "Boxplot для нек. станций метро", xlab = "Цена", ylab = "Метро")
+```
+
+```{python}
+#python
+plt.clf()
+sns.boxplot(data=df_short, x='price', y='metro')
+plt.show()
+```
+
+На Тверской среднее цены сильно больше, чем, например, на Смоленской, хотя их медианы почти совпадают (оно и понятно, т.к. среднее менее устойчиво к выбросам). Также, хорошо видна степень разброса цен.
+
+```{r}
+stripchart(price ~ total_area, data = data_short, vertical = TRUE, main = "График зависимости цены от площади квартиры", xlab = "Площадь", ylab = "Цена")
+```
+
+```{python}
+#python
+plt.clf()
+fig, ax = plt.subplots()
+sns.stripplot(data=df_short, y='price', x='total_area')
+plt.locator_params(nbins=20)
+plt.show()
+```
+
+Посмотрим, почему у некоторых квартир с площадью в диапазоне от 50 до 60 кв. м. очень большая цена.
+
+```{python}
+
+df[(df.price > 9*1e8) & (df.total_area < 60) & (df.total_area > 50)].metro.unique()
+```
+
+Станции метро в основном из центра города, это всё объясняет.
+
+# **3. Проверка на выбросы с помощью критерия Граббса и Q-теста Диксона**
+
+**Рассмотрим район метро "Тверская"**
+
+```{r fig.height=3, fig.width=5}
+boxplot(data[which(data$metro == " Tverskaia "),]$price, horizontal = TRUE, xlab="Цена", main = "Тверская")
+```
+
+**Критерий Граббса** имеет статистику $G = \frac{\max_{i = 1, …, N}|Y_i - \overline{Y}|}{s}$, где $s$ - выборочное стандартное отклонение, $\overline{Y}$ - выборочное среднее.
+
+```{r}
+grubbs.test(data[which(data$metro == " Tverskaia "),]$price)
+```
+
+p-value маленькое. Посмотрим, какой объект является выбросом
+
+```{r}
+data[which(data$price == 1203784960 & data$metro == " Tverskaia "), c("metro", "rooms", "price", "living_area")]
+```
+
+300 кв.м.
+
+Статистика для **Q-теста Диксона** имеет вид $Q = \frac{gap}{range}$, где $gap$ - модуль разности между предполагаемым выбросом и ближайшим к нему другим объектом. $range$ - разность максимального и минимального значения в выборке.
+
+```{r}
+dixon.test(data[which(data$metro == " Tverskaia "),]$price)
+```
+
+А здесь p-value большое. На boxplot видно, что есть объект, достаточно близкий к максимуму, поэтому статистика Q принимает умеренные значения. Там же видно, что несколько объектов отстают от основной массы, скорее всего являются выбросами. В данном случае, критерий Граббса показал себя лучше.
+
+# **4. Заполнение пропусков**
+
+Сделаем пропуски вручную. Генерация индексов:
+
+```{r}
+NA_index <- sample(0:952, 5)
+```
+
+```{python}
+#python
+NA_index = np.random.randint(df_short.shape[0], size=5)
+NA_index
+```
+
+```{r}
+data_with_NA <- data_short
+data_with_NA[NA_index, ]$price <- NA
+data_with_NA[NA_index, ]
+```
+
+```{python}
+#python
+df_with_NA = df_short.copy()
+df_with_NA.iloc[NA_index, 1] = np.nan
+df_with_NA.iloc[NA_index]
+```
+
+```{r}
+data_filled_1 <- mice(data_with_NA)
+data_filled <- complete(data_filled_1, action = 3)
+```
+
+Заполненные данные:
+
+```{r}
+print(data_filled[NA_index, ]$price)
+```
+
+Оригинальные:
+
+```{r}
+print(data_short[NA_index, ]$price)
+```
+
+```{python}
+#python
+df_with_NA.ffill(inplace=True)
+print("Заполненные данные:\n", df_with_NA.iloc[NA_index].price, '\n')
+print("Оригинальные:\n", df_short.iloc[NA_index].price)
+```
+
+# **5. Генерация данных из нормального распределения и проверка гипотез о нормальности**
+
+## **Генерирую данные**
+
+```{r}
+data_norm_1 <- sort(rnorm(100, 0, 1))
+data_norm_2 <- sort(rnorm(100, 0, 10))
+data_norm_3 <- sort(rnorm(5000, 0, 1))
+data_norm_4 <- sort(rnorm(5000, 0, 10))
+```
+
+```{python}
+#python
+norm_data1 = np.random.normal(0, 1, size=100)
+norm_data1 = (norm_data1 - np.mean(norm_data1)) / np.std(norm_data1)
+norm_data2 = np.random.normal(0, 10, size=5000)
+norm_data2 = (norm_data2  - np.mean(norm_data2)) / np.std(norm_data2)
+norm_data3 = np.random.normal(0, 1, size=100)
+norm_data3 = (norm_data3  - np.mean(norm_data3)) / np.std(norm_data3)
+norm_data4 = np.random.normal(0, 10, size=5000)
+norm_data4 = (norm_data4 - np.mean(norm_data4)) / np.std(norm_data4)
+```
+
+## **Эмпирическая функция распределения**
+
+```{r}
+plot(data_norm_1, main=sprintf("ЭФР для n = %s наблюдений, sigma = 1", length(data_norm_1)), pnorm(data_norm_1, mean = 0, sd = 1), type = "l", col = "blue")
+plot(ecdf(data_norm_1), add = TRUE)
+
+plot(data_norm_2, main=sprintf("ЭФР для n = %s наблюдений, sigma = 10", length(data_norm_2)), pnorm(data_norm_2, mean = 0, sd = 10), type = "l", col="blue")
+plot(ecdf(data_norm_2), add = TRUE)
+
+plot(data_norm_3, main=sprintf("ЭФР для n = %s наблюдений, sigma = 1", length(data_norm_3)), pnorm(data_norm_3, mean = 0, sd = 1), type = "l", col="blue")
+plot(ecdf(data_norm_3), add = TRUE)
+
+plot(data_norm_4, main=sprintf("ЭФР для n = %s наблюдений, sigma = 10", length(data_norm_4)), pnorm(data_norm_4, mean = 0, sd = 10), type = "l", col="blue")
+plot(ecdf(data_norm_4), add=TRUE)
+```
+
+```{python}
+#python
+for d in [norm_data1, norm_data2, norm_data3, norm_data4]:
+    plt.clf()
+    sns.displot(data=(d - np.mean(d))/np.std(d), kind='ecdf')
+    plt.show()
+```
+
+## **Сравнение с квантилями**
+
+```{r}
+qqgraph <- function(x){
+  qqnorm(x)
+  qqline(x)
+}
+
+qqgraph(data_norm_1)
+qqgraph(data_norm_2)
+qqgraph(data_norm_3)
+qqgraph(data_norm_4)
+```
+
+```{python}
+#python
+for d in [norm_data1, norm_data2, norm_data3, norm_data4]:
+    plt.clf()
+    sm.qqplot(d)
+    plt.show()
+```
+
+С ростом объёма выборки эмпирические квантили приближаются к теоретическим.
+
+## **Метод огибающих**
+
+```{r}
+envelmet <- function(x){
+  z <- scale(x)
+  x.qq <- qqnorm(z, plot.it = FALSE)
+  x.qq <- lapply(x.qq, sort)
+  plot(x.qq, ylim = c(-10, 10))
+}
+envelmet(data_norm_1)
+envelmet(data_norm_2)
+envelmet(data_norm_3)
+envelmet(data_norm_4)
+```
+
+```{r}
+data_norm_1 = scale(data_norm_1)
+data_norm_2 = scale(data_norm_2)
+data_norm_3 = scale(data_norm_3)
+data_norm_4 = scale(data_norm_4)
+```
+
+## **Тест Колмогорова-Смирнова**
+
+```{r}
+ks.test(data_norm_2, "pnorm")
+ks.test(data_norm_4, "pnorm")
+```
+
+```{python}
+#python
+for d in [norm_data1, norm_data2, norm_data3, norm_data4]:
+    print(kstest((d - np.mean(d))/np.std(d), 'norm'))
+```
+
+```{r}
+ks.test(data_norm_1, data_norm_3)
+ks.test(data_norm_2, data_norm_4)
+```
+
+## **Тест Шапиро-Уилка**
+
+```{r}
+shapiro.test(data_norm_1)
+shapiro.test(data_norm_2)
+shapiro.test(data_norm_3)
+shapiro.test(data_norm_4)
+```
+
+```{python}
+#python
+for d in [norm_data1, norm_data2, norm_data3, norm_data4]:
+    print(shapiro((d - np.mean(d))/np.std(d)))
+```
+
+**Тест Андерсона-Дарлинга**
+
+```{r}
+ad.test(data_norm_1)
+ad.test(data_norm_2)
+ad.test(data_norm_3)
+ad.test(data_norm_4)
+```
+
+```{python}
+#python
+for d in [norm_data1, norm_data2, norm_data3, norm_data4]:
+    print(anderson((d - np.mean(d))/np.std(d)))
+```
+
+## **Тест Крамера - фон Мизеса**
+
+```{r}
+cvm.test(data_norm_1)
+cvm.test(data_norm_2)
+cvm.test(data_norm_3)
+cvm.test(data_norm_4)
+```
+
+```{python}
+#python
+for d in [norm_data1, norm_data2, norm_data3, norm_data4]:
+    print(cramervonmises((d - np.mean(d))/np.std(d), 'norm'))
+```
+
+## **Критерий Колмогорова-Смирнова в модификации Лиллиефорса и Шапиро-Франсия**
+
+```{r}
+lillie.test(data_norm_1)
+lillie.test(data_norm_2)
+lillie.test(data_norm_3)
+lillie.test(data_norm_4)
+```
+
+В целом,все критерии хорошо идентифицируют нормальное распределение.
+
+# **6. Анализ данных с помощью графиков квантилей, метода огибающих, а также стандартных процедур проверки гипотез о нормальности.**
+
+```{r}
+price_scaled_short = scale(data_short$price)
+price_scaled = scale(data$price)
+```
+
+```{python}
+#python
+price_scaled_short = (df_short.price - np.mean(df_short.price))/np.std(df_short.price)
+price_scaled = (df.price - np.mean(df.price))/np.std(df.price)
+```
+
+График квантилей для малого объёма данных
+
+```{r}
+qqgraph(price_scaled_short)
+```
+
+```{python}
+#python
+plt.clf()
+sm.qqplot(price_scaled_short)
+plt.show()
+```
+
+График квантилей для большого объёма данных
+
+```{r}
+qqgraph(price_scaled)
+```
+
+```{python}
+#python
+plt.clf()
+sm.qqplot(price_scaled)
+plt.show()
+```
+
+Видно, что цена не соответствует нормальному распределению.
+
+```{r}
+ks.test(price_scaled_short, "pnorm")
+shapiro.test(price_scaled_short)
+ad.test(price_scaled_short)
+cvm.test(price_scaled_short)
+lillie.test(price_scaled_short)
+```
+
+```{python}
+#python
+print(kstest(price_scaled_short, 'norm'))
+print(shapiro(price_scaled_short))
+print(anderson(price_scaled_short))
+print(cramervonmises(price_scaled_short, 'norm'))
+```
+
+```{r}
+ks.test(price_scaled, "pnorm")
+ad.test(price_scaled)
+cvm.test(price_scaled)
+lillie.test(price_scaled)
+```
+
+```{python}
+#python
+print(kstest(price_scaled, 'norm'))
+print(shapiro(price_scaled))
+print(anderson(price_scaled))
+print(cramervonmises(price_scaled, 'norm'))
+```
+
+# **7. Продемонстрировать применение для проверки различных гипотез и различных доверительных уровней 0.9, 0.95, 0.99 следующих критериев:**
+
+## **Критерий Стьюдента**
+
+Проверим, как ведёт себя критерий Стьюдента, если в качестве предполагаемого среднего цены квартир на окраине взять среднее по всей выборке. Квартиры на окраинах составляют 62% всего датасета.
+
+```{python}
+#python
+print(df[df.metro=='Outskirts'].shape[0]/df.shape[0])
+```
+
+```{r}
+print(paste('Среднее цены по всей выборке', mean(data$price)))
+for (conf_level in c(0.9, 0.95, 0.99))
+  print(t.test(subset(data, metro=='Outskirts')$price, 
+               mu = mean(data$price), 
+               conf.level = conf_level))
+```
+
+Гипотезу отвергаем, хотя средние и похожи.
+
+Теперь используем двусторонний критерий для сравнения средних цен для квартир на Беляево и Первомайской. Их квантили +- похожи на гауссовские, средние равны и их можно считать независимыми, т.к. эти станции расположены очень далеко друг от друга, а значит, критерий Стьюдента можно применять.
+
+```{r}
+print(mean(subset(data, metro==' Beliaevo ')$price))
+print(mean(subset(data, metro==' Pervomaiskaia ')$price))
+```
+
+```{r}
+qqgraph(scale(subset(data, metro==' Beliaevo ')$price))
+qqgraph(scale(subset(data, metro==' Pervomaiskaia ')$price))
+```
+
+```{python}
+#python
+for conf in [0.9, 0.95, 0.99]:
+    print("Доверительный уровень {}\n".format(conf))
+    for alt in ['two-sided', 'greater']:
+        print(
+          ttest(df[df.metro == ' Beliaevo '].price, 
+                df[df.metro == ' Pervomaiskaia '].price,
+                alternative=alt, 
+                confidence=conf)[['CI{}%'.format(int(100*conf)), 
+                                  'p-val', 
+                                  'alternative']])
+        print()
+```
+
+p-value 0.99, значит выборка хорошо показывает среднюю цену на недвижимость в этих районах.
+
+**Критерий Уилкоксона-Манна-Уитни**
+
+Рассмотрим объекты на тех же станциях. Нулевая гипотеза $H_0$ - распределения цен равны, альтернатива $H_1$ - распределения не равны.
+
+```{r}
+wilcox.test(x = subset(data, metro==' Beliaevo ')$price,
+            y = subset(data, metro==' Pervomaiskaia ')$price,
+            alternative = 'two.sided',
+            exact = FALSE)
+
+```
+
+```{python}
+#python
+print(mannwhitneyu(df[df.metro == ' Beliaevo '].price,
+                   df[df.metro == ' Pervomaiskaia '].price,
+                   alternative = 'two-sided'))
+```
+
+Как видно, p-value мал, значит нельзя утверждать о том, что цены распределены одинакого.
+
+## **Критерий Фишера:**
+
+```{r}
+var.test(subset(data, metro==' Beliaevo ')$price,
+         subset(data, metro==' Pervomaiskaia ')$price)
+```
+
+Делаем вывод, что дисперсии существенно различаются.
+
+## **Критерий Левене:**
+
+```{r}
+f <- c(rep(1, length(subset(data, metro==' Beliaevo ')$price)),
+       rep(2, length(subset(data, metro==' Pervomaiskaia ')$price)))
+print(leveneTest(c(subset(data, metro==' Beliaevo ')$price,
+                   subset(data, metro==' Pervomaiskaia ')$price),
+                 group = f))
+```
+
+```{python}
+#python
+print(levene(df[df.metro == ' Beliaevo '].price,
+             df[df.metro == ' Pervomaiskaia '].price))
+```
+
+Критерий Левене дал противоположный результат.
+
+## **Критерий Бартлетта:**
+
+```{r}
+print(bartlett.test(c(subset(data, metro==' Beliaevo ')$price,
+                      subset(data, metro==' Pervomaiskaia ')$price),
+                      g = f))
+```
+
+```{python}
+#python
+print(bartlett(df[df.metro == ' Beliaevo '].price,
+               df[df.metro == ' Pervomaiskaia '].price))
+```
+
+## **Критерий Флигнера-Килина:**
+
+```{r}
+print(fligner.test(c(subset(data, metro==' Beliaevo ')$price,
+                     subset(data, metro==' Pervomaiskaia ')$price),
+                   g=f))
+```
+
+```{python}
+#python
+print(fligner(df[df.metro == ' Beliaevo '].price,
+              df[df.metro == ' Pervomaiskaia '].price))
+```
+
+Можно утверждать, что дисперсии у распределений разные. Критерий Левене ошибается, т.к. он [уступает](https://ami.nstu.ru/~headrd/seminar/publik_html/Homogeneity_variance_1.pdf) по мощности остальным.
+
+# **8. Исследовать корреляционные взаимосвязи в данных с помощью коэффициентов корреляции Пирсона, Спирмена и Кендалла.**
+
+Посмотрим, как цена коррелирует с количеством минут ходьбы до ближайшего метро, площадью объекта и просмотрами объявления.
+
+## **Пирсон:**
+
+```{python}
+#python
+for feat in ['minutes', 'total_area', 'views']:
+    res = pearsonr(df[feat], df['price'])
+    print('price / {}:\n corr = {res[0]}, p-value = {res[1]}'
+          .format(feat, res=res))
+```
+
+```{r}
+for (feat in c("minutes", "total_area", "views"))
+  print(cor.test(data[feat][, 1], data$price, method='pearson'))
+```
+
+## **Спирмен:**
+
+```{python}
+#python
+for feat in ['minutes', 'total_area', 'views']:
+    res = spearmanr(df[feat], df['price'])
+    print('price / {}:\n corr = {res[0]}, p-value = {res[1]}'
+          .format(feat, res=res))
+```
+
+```{r}
+for (feat in c("minutes", "total_area", "views"))
+  print(cor.test(data[feat][, 1], data$price, method='spearman'))
+```
+
+## **Кендалл:**
+
+```{python}
+#python
+for feat in ['minutes', 'total_area', 'views']:
+    res = kendalltau(df[feat], df['price'])
+    print('price / {}:\n corr = {res[0]}, p-value = {res[1]}'
+          .format(feat, res=res))
+```
+
+Поскольку данные большие, на R используем [аппроксимацию](https://rdrr.io/cran/pcaPP/man/cor.fk.html)
+
+```{r}
+for (feat in c("minutes", "total_area", "views"))
+  print(cor.fk(data[feat][, 1], data$price))
+```
+
+Есть явная корреляция цены с площадью квартиры, хотя о линейной зависимости говорить нельзя.
+
+# **9. Продемонстрировать использование методов хи-квадрат, точного теста Фишера, теста МакНемара, Кохрана-Мантеля-Хензеля.**
+
+Какой район мог бы служить *эталоном*? Т.е. недвижимость в этом районе была бы *похожей* на среднюю по Москве.
+
+Ничего лучше, чем рассмотреть распределение по кол-ву комнат в квартирах, я не придумал.
+
+Предположим, что низ серой ветки является эталоном. p - вектор из частот для разного кол-ва комнат по Москве.
+
+## **Тест** $\chi^2$**:**
+
+```{r}
+p <- table(data$rooms) / length(data$rooms)
+
+tmp <- table(data[data$metro == ' Kakhovskaia ' |
+                  data$metro == ' Sevastopolskaia ' |
+                  data$metro == ' Uzhnaia ' |
+                  data$metro == ' Prazhskaia ' |
+                  data$metro == ' Annino ',]$rooms)
+
+chisq.test(tmp / sum(tmp), p=p)
+```
+
+```{python}
+#python
+p = df.rooms.apply(str).value_counts() / df.shape[0]
+
+tmp = df[(df.metro == ' Kakhovskaia ') |
+           (df.metro == ' Sevastopolskaia ') |
+           (df.metro == ' Uzhnaia ') |
+           (df.metro == ' Prazhskaia ') |
+           (df.metro == ' Annino ')].rooms.apply(str).value_counts()
+
+for key in df.rooms.apply(str).unique():
+  if not key in tmp:
+    tmp[key] = 0
+
+print(chisquare(tmp / sum(tmp), p))
+```
+
+Данные не противоречат гипотезе. Хотя и наблюдений мало (\~150).
+
+## **Точный тест Фишера:**
+
+Проверим однородность данных внутри тех же станций. Для этого рассмотрим двух- и трёхкомнатные квартиры, а станции поделим на две части.
+
+```{r}
+tmp1 <- table(data[data$metro == ' Kakhovskaia ' |
+                   data$metro == ' Sevastopolskaia ',]$rooms)
+tmp2 <- table(data[data$metro == ' Uzhnaia ' |
+                   data$metro == ' Prazhskaia ' |
+                   data$metro == ' Annino ', ]$rooms)
+
+m <- matrix(c(tmp1['2'], tmp1['3'], tmp2['2'], tmp2['3']),
+            nrow=2, ncol=2, byrow=TRUE)
+print(m)
+
+print(fisher.test(m))
+```
+
+```{python}
+#python
+tmp1 = df[(df.metro == ' Kakhovskaia ') |
+           (df.metro == ' Sevastopolskaia ')].rooms.apply(str).value_counts()
+
+tmp2 = df[(df.metro == ' Uzhnaia ') |
+           (df.metro == ' Prazhskaia ') |
+           (df.metro == ' Annino ')].rooms.apply(str).value_counts()
+
+m = [[tmp1['2'], tmp1['3']],
+     [tmp2['2'], tmp2['3']]]
+
+print(fisher_exact(m))
+```
+
+Тут p-value не такой высокий, но тест Фишера подходит для выборок малого объёма, поэтому гипотеза правдоподобна.
+
+## **Тест МакНемара:**
+
+Этот критерий требует бинарных пртзнаков, поэтому немного изменим матрицу.
+
+```{r}
+
+m1 <- matrix(c(sum(tmp1) - tmp1['3'], tmp1['3'], sum(tmp2) - tmp2['3'], tmp2['3']),
+            nrow=2, ncol=2, byrow=TRUE)
+
+print(mcnemar.test(m1))
+```
+
+```{python}
+#python
+m1 = [[sum(tmp1) - tmp1['3'], tmp1['3']],
+      [sum(tmp2) - tmp2['3'], tmp2['3']]]
+
+print(mcnemar(m1, exact=False))
+```
+
+На этом тесте неудача, но это означает, что маргинальные распределения могут не совпадать.
+
+# **10. Проверить наличие мультиколлинеарности в данных с помощьюю корреляционной матрицы и фактора инфляции дисперсии.**
+
+## **Корреляционная матрица**
+
+```{r}
+corrplot(cor(data[, c("price", "minutes",
+                      "living_area", "total_area", "kitchen_area",
+                      "views", "storey")]),
+         method="color")
+```
+
+```{python}
+#python
+plt.clf()
+sns.heatmap(df[["price", "minutes",
+                "living_area", "total_area", "kitchen_area",
+                "views", "storey"]].corr(), cmap='summer')
+plt.show()
+```
+
+total_area и living_area сильно коррелируют (очев.). Интересно, что kitchen_area слабо связана с total_area и коррелирует в обратную сторону с количеством просмотров.
+
+living_area выкидываем.
+
+## **Фактор инфляции дисперсии:**
+
+```{r}
+model <- lm(price ~ minutes + total_area + kitchen_area + storey, data=data)
+print(VIF(model))
+```
+
+```{python}
+#python
+for fact in ["minutes", "total_area", "kitchen_area", "views", "storey"]:
+    print(fact, "/ price VIF = ", variance_inflation_factor(df[["price", fact]], 0))
+```
+
+Почему-то получились разные результаты, но в обоих случаях VIF небольшой, это значит, что нет фактора, который бы сильнее остальных коррелировал с ценой.
+
+# **11. Исследовать зависимости в данных с помощью дисперсионного анализа.**
+
+Проверим, зависит ли средняя цена от продавца недвижимости (владелец, агенство и т.д.).
+
+```{r}
+print(summary(aov(price ~ provider, data = data)))
+```
+
+Видим, что p-value маленькое, значит, зависимость есть. В python удобнее рассматривать конкретные пары (aov в R проверяет сразу по всем категориям).
+
+Рассмотрим пары владелец / застройщик и владелец / агенство.
+
+```{python}
+#python
+print("owner / developer:\n",
+      f_oneway(df[df.provider.apply(lambda x: x.strip()) == 'owner'].price,
+               df[df.provider.apply(lambda x: x.strip()) == 'developer'].price))
+
+print("owner / agency:\n",
+      f_oneway(df[df.provider.apply(lambda x: x.strip()) == 'owner'].price,
+               df[df.provider.apply(lambda x: x.strip()) == 'agency'].price))
+```
+
+Видно, что в среднем цена у владельцев и застройщиков одинакова, а у агенств отличается.
+
+# **12. Подогнать регрессионные модели (в том числе, нелинейные) к данным, а также оценить качество подобной аппроксимации.**
+
+Рассматриваю линейную модель с $L^1$-регуляризацией.
+
+```{r}
+
+index <- c('metro', 'minutes', 'way', 'provider', 'storey', 'storeys',
+           'rooms', 'total_area', 'living_area', 'kitchen_area')
+
+sample <- sample(c(TRUE, FALSE), nrow(data), replace=TRUE, prob=c(0.7,0.3))
+train  <- data[sample, ]
+test   <- data[!sample, ]
+
+cv_model <- cv.glmnet(data.matrix(train[,index]),
+                      data.matrix(train$price),
+                      alpha = 1)
+
+best_lambda <- cv_model$lambda.min
+
+plot(cv_model) 
+```
+
+```{r}
+best_model <- glmnet(data.matrix(train[,index]),
+                     data.matrix(train$price),
+                     alpha=1,
+                     lambda=best_lambda)
+
+pred <- predict(best_model, s=best_lambda, newx=data.matrix(test[,index]))
+
+print(paste("test RMSE = ", sqrt(mean((pred - test$price)**2))))
+
+print(coef(best_model))
+```
+
+Получилась очень плохая оценка. Попробую отмасштабировать данные.
+
+```{python}
+#python
+
+sc = StandardScaler()
+
+data_sc = df.drop("views", axis=1)
+data_sc.loc[:, ~data_sc.columns.isin(["metro", "way", "provider", "rooms"])] = sc.fit_transform(
+  data_sc.drop(["metro", "way", "provider", "rooms"], axis=1))
+
+data_sc.loc[:,["metro", "way", "provider", "rooms"]].apply(str)
+data_sc = pd.get_dummies(data_sc, columns=["metro", "way", "provider", "rooms"])
+
+X_train, X_test, y_train, y_test = train_test_split(data_sc.drop(["price"], axis=1).to_numpy(),
+                                                    data_sc.price.to_numpy(),
+                                                    test_size=0.3)
+```
+
+```{python}
+#python
+
+model = LassoCV(cv=5)
+model.fit(X_train, y_train)
+
+err = np.sqrt(np.mean((model.predict(X_test) - y_test)**2))
+
+print("test RMSE (scaled):", err)
+print("test RMSE * scale:", err * sc.scale_[0])
+```
+
+Немного получше. Попробую бустинг с метрикой среднего абсолютного значения.
+
+```{python}
+#python
+
+model = CatBoostRegressor(iterations=2000, verbose=1000, loss_function="MAE")
+
+model.fit(X_train, y_train)
+pred = model.predict(X_test)
+
+err = mean_absolute_error(pred, y_test)
+
+print("test MAE (scaled):", err)
+print("test MAE * scale:", err * sc.scale_[0])
+```
+
+Эта оценка намного лучше, но всё равно ошибка достаточно большая, хотя данных много. Предположу, что недвижимость в Москве очень разнородна, поэтому простые модели не вполне справляются с прогнозированием цены.
